@@ -1,0 +1,100 @@
+name: Build FotoCetak Pro Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Buat EXE Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 60
+
+    steps:
+      - name: Ambil source code
+        uses: actions/checkout@v4
+
+      - name: Pasang Flutter di komputer GitHub
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.1'
+          channel: stable
+          cache: true
+
+      - name: Siapkan proyek Windows
+        shell: pwsh
+        run: |
+          flutter config --enable-windows-desktop
+          flutter create --platforms=windows --project-name=fotocetak_pro .
+          flutter pub get
+
+      - name: Gunakan nama aplikasi pada title bar Windows
+        shell: pwsh
+        run: |
+          $main = 'windows/runner/main.cpp'
+          if (Test-Path $main) {
+            $content = Get-Content $main -Raw
+            $content = $content.Replace('L"fotocetak_pro"', 'L"FotoCetak Pro"')
+            Set-Content $main $content -Encoding UTF8
+          }
+
+      - name: Format sumber Dart di runner
+        shell: pwsh
+        run: dart format lib test
+
+      - name: Periksa masalah kode
+        shell: pwsh
+        run: flutter analyze --no-fatal-infos
+
+      - name: Uji dasar aplikasi
+        shell: pwsh
+        run: flutter test
+
+      - name: Build aplikasi EXE versi Release
+        shell: pwsh
+        run: flutter build windows --release
+
+      - name: Sertakan VC++ runtime tanpa instalasi di laptop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = 'build/windows/x64/runner/Release'
+          if (-not (Test-Path (Join-Path $release 'fotocetak_pro.exe'))) {
+            throw "EXE tidak ditemukan di $release"
+          }
+          $redistRoots = @(
+            'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC',
+            'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Redist\MSVC',
+            'C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Redist\MSVC'
+          ) | Where-Object { Test-Path $_ }
+          if (-not $redistRoots) {
+            throw 'Folder redistributable Visual C++ tidak tersedia pada runner GitHub.'
+          }
+          $crtPath = $null
+          foreach ($root in $redistRoots) {
+            foreach ($versionDir in (Get-ChildItem $root -Directory | Sort-Object Name -Descending)) {
+              $candidate = Join-Path $versionDir.FullName 'x64\Microsoft.VC143.CRT'
+              if (Test-Path (Join-Path $candidate 'msvcp140.dll')) {
+                $crtPath = $candidate
+                break
+              }
+            }
+            if ($crtPath) { break }
+          }
+          if (-not $crtPath) { throw 'Folder CRT x64 tidak ditemukan.' }
+          foreach ($dll in @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')) {
+            Copy-Item -Path (Join-Path $crtPath $dll) -Destination $release -Force
+          }
+          Write-Host 'EXE dan DLL pendukung siap didistribusikan.'
+
+      - name: Siapkan ZIP aplikasi untuk diunduh
+        uses: actions/upload-artifact@v4
+        with:
+          name: FotoCetakPro-Windows-x64
+          path: build/windows/x64/runner/Release/
+          if-no-files-found: error
+          retention-days: 14
